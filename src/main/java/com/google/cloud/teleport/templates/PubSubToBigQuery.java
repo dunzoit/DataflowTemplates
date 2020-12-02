@@ -30,6 +30,8 @@ import com.google.cloud.teleport.util.ResourceUtils;
 import com.google.cloud.teleport.util.ValueProviderUtils;
 import com.google.cloud.teleport.values.FailsafeElement;
 import com.google.common.collect.ImmutableList;
+
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
@@ -61,6 +63,7 @@ import org.apache.beam.sdk.values.PCollectionTuple;
 import org.apache.beam.sdk.values.TupleTag;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.joda.time.Duration;
 
 /**
  * The {@link PubSubToBigQuery} pipeline is a streaming pipeline which ingests data in JSON format
@@ -271,24 +274,43 @@ public class PubSubToBigQuery {
                     .withoutValidation()
                     .withCreateDisposition(CreateDisposition.CREATE_NEVER)
                     .withWriteDisposition(WriteDisposition.WRITE_APPEND)
-                    .withExtendedErrorInfo()
-                    .withMethod(BigQueryIO.Write.Method.STREAMING_INSERTS)
-                    .withFailedInsertRetryPolicy(InsertRetryPolicy.retryTransientErrors())
+                    .withNumFileShards(30)
+                	.withTriggeringFrequency(Duration.standardSeconds(90))
+                    .withMethod(BigQueryIO.Write.Method.FILE_LOADS)
+                        .withFailedInsertRetryPolicy(InsertRetryPolicy.alwaysRetry())
                     .to(options.getOutputTableSpec()));
 
     /*
      * Step 3 Contd.
      * Elements that failed inserts into BigQuery are extracted and converted to FailsafeElement
      */
-    PCollection<FailsafeElement<String, String>> failedInserts =
+     /*PCollection<FailsafeElement<String, String>> failedInserts =
         writeResult
-            .getFailedInsertsWithErr()
+            .getFailedInserts()
             .apply(
                 "WrapInsertionErrors",
-                MapElements.into(FAILSAFE_ELEMENT_CODER.getEncodedTypeDescriptor())
-                    .via((BigQueryInsertError e) -> wrapBigQueryInsertError(e)))
-            .setCoder(FAILSAFE_ELEMENT_CODER);
+                ParDo.of(new DoFn<TableRow, Object>() {
+                           @ProcessElement
+                           public void processElement(ProcessContext context) {
+                             context.output(MapElements.into(FAILSAFE_ELEMENT_CODER.getEncodedTypeDescriptor())
+                                     .via((TableRow e) -> {
+                                       FailsafeElement<String, String> failsafeElement;
+                                       try {
 
+                                         failsafeElement = FailsafeElement.of(context.element().toPrettyString(), e.toPrettyString());
+                                         failsafeElement.setErrorMessage("Error in insertion");
+
+                                       } catch (IOException ex) {
+                                         throw new RuntimeException(ex);
+                                       }
+
+                                       return failsafeElement;
+                                     }));
+                           }
+                         }))
+
+            .setCoder(FAILSAFE_ELEMENT_CODER);
+*/
     /*
      * Step #4: Write records that failed table row transformation
      * or conversion out to BigQuery deadletter table.
@@ -310,6 +332,7 @@ public class PubSubToBigQuery {
                 .build());
 
     // 5) Insert records that failed insert into deadletter table
+    /*
     failedInserts.apply(
         "WriteFailedRecords",
         ErrorConverters.WriteStringMessageErrors.newBuilder()
@@ -323,7 +346,7 @@ public class PubSubToBigQuery {
 
     return pipeline.run();
   }
-
+*/
   /**
    * If deadletterTable is available, it is returned as is, otherwise outputTableSpec +
    * defaultDeadLetterTableSuffix is returned instead.
