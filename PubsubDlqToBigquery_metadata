@@ -1,0 +1,28 @@
+{
+      "description": "A pipeline that transfers pubsub messages with attributes to BQ",
+        "name": "Pubsub DLQ to Bigquery",
+        "parameters": [
+        {
+            "regexes": [
+                    "^project\/+$"
+                          
+            ],
+                  "name": "inputSubscriptions",
+                        "helpText": "Comma separated list of pubsub subscriptions. eg - projects/test/...",
+                              "label": "Input Subscriptions comma separated"
+                                  
+        },
+        {
+            "regexes": [
+                    "^+$"
+                          
+            ],
+                  "name": "outputTableSpec",
+                        "helpText": "Output Bigquery table to write records to. Table must exist before pipeline is run. eg - <project-name>:<dataset-name>.<table>",
+                              "label": "Output Bigquery table"
+                                  
+        }
+          
+        ]
+        
+}
