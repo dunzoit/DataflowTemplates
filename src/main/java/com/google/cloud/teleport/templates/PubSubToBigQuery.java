@@ -16,25 +16,42 @@
 
 package com.google.cloud.teleport.templates;
 
-import static com.google.cloud.teleport.templates.TextToBigQueryStreaming.wrapBigQueryInsertError;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectWriter;
+import com.google.api.client.json.JsonFactory;
 import com.google.api.services.bigquery.model.TableRow;
 import com.google.cloud.teleport.coders.FailsafeElementCoder;
 import com.google.cloud.teleport.templates.common.BigQueryConverters.FailsafeJsonToTableRow;
 import com.google.cloud.teleport.templates.common.ErrorConverters;
+import com.google.cloud.teleport.templates.models.Attribute;
 import com.google.cloud.teleport.templates.common.JavascriptTextTransformer.FailsafeJavascriptUdf;
 import com.google.cloud.teleport.templates.common.JavascriptTextTransformer.JavascriptTextTransformerOptions;
+import com.google.cloud.teleport.templates.models.PubsubDLQError;
 import com.google.cloud.teleport.util.DualInputNestedValueProvider;
 import com.google.cloud.teleport.util.DualInputNestedValueProvider.TranslatorInput;
 import com.google.cloud.teleport.util.ResourceUtils;
 import com.google.cloud.teleport.util.ValueProviderUtils;
 import com.google.cloud.teleport.values.FailsafeElement;
 import com.google.common.collect.ImmutableList;
+
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
+
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
 import org.apache.beam.sdk.coders.CoderRegistry;
+import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
+import org.apache.beam.sdk.extensions.gcp.util.Transport;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO.Write.CreateDisposition;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO.Write.WriteDisposition;
@@ -49,16 +66,8 @@ import org.apache.beam.sdk.options.Description;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.options.ValueProvider;
-import org.apache.beam.sdk.transforms.DoFn;
-import org.apache.beam.sdk.transforms.Flatten;
-import org.apache.beam.sdk.transforms.MapElements;
-import org.apache.beam.sdk.transforms.PTransform;
-import org.apache.beam.sdk.transforms.ParDo;
-import org.apache.beam.sdk.transforms.SerializableFunction;
-import org.apache.beam.sdk.values.PCollection;
-import org.apache.beam.sdk.values.PCollectionList;
-import org.apache.beam.sdk.values.PCollectionTuple;
-import org.apache.beam.sdk.values.TupleTag;
+import org.apache.beam.sdk.transforms.*;
+import org.apache.beam.sdk.values.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -147,6 +156,8 @@ public class PubSubToBigQuery {
   /** The default suffix for error tables if dead letter table is not specified. */
   public static final String DEFAULT_DEADLETTER_TABLE_SUFFIX = "_error_records";
 
+  private static final JsonFactory JSON_FACTORY = Transport.getJsonFactory();
+
   /** Pubsub message/string coder for pipeline. */
   public static final FailsafeElementCoder<PubsubMessage, String> CODER =
       FailsafeElementCoder.of(PubsubMessageWithAttributesCoder.of(), StringUtf8Coder.of());
@@ -155,6 +166,7 @@ public class PubSubToBigQuery {
   public static final FailsafeElementCoder<String, String> FAILSAFE_ELEMENT_CODER =
       FailsafeElementCoder.of(StringUtf8Coder.of(), StringUtf8Coder.of());
 
+  public static final ObjectWriter ow = new ObjectMapper().writer().withDefaultPrettyPrinter();
   /**
    * The {@link Options} class provides the custom execution options passed by the executor at the
    * command-line.
@@ -165,25 +177,13 @@ public class PubSubToBigQuery {
 
     void setOutputTableSpec(ValueProvider<String> value);
 
-    @Description("Pub/Sub topic to read the input from")
-    ValueProvider<String> getInputTopic();
-
-    void setInputTopic(ValueProvider<String> value);
-
     @Description(
-        "The Cloud Pub/Sub subscription to consume from. "
+        "The Cloud Pub/Sub subscriptions to consume from. "
             + "The name should be in the format of "
             + "projects/<project-id>/subscriptions/<subscription-name>.")
-    ValueProvider<String> getInputSubscription();
+    ValueProvider<List<String>> getInputSubscriptions();
 
-    void setInputSubscription(ValueProvider<String> value);
-
-    @Description(
-        "This determines whether the template reads from " + "a pub/sub subscription or a topic")
-    @Default.Boolean(false)
-    Boolean getUseSubscription();
-
-    void setUseSubscription(Boolean value);
+    void setInputSubscriptions(ValueProvider<List<String>> value);
 
     @Description(
         "The dead-letter table to output to within BigQuery in <project-id>:<dataset>.<table> "
@@ -238,19 +238,24 @@ public class PubSubToBigQuery {
      * Either from a Subscription or Topic
      */
 
-    PCollection<PubsubMessage> messages = null;
-    if (options.getUseSubscription()) {
-      messages =
-          pipeline.apply(
-              "ReadPubSubSubscription",
-              PubsubIO.readMessagesWithAttributes()
-                  .fromSubscription(options.getInputSubscription()));
-    } else {
-      messages =
-          pipeline.apply(
-              "ReadPubSubTopic",
-              PubsubIO.readMessagesWithAttributes().fromTopic(options.getInputTopic()));
-    }
+    PCollection<KV<String, PubsubMessage>> messages = null;
+      List<String> subscriptions = options.getInputSubscriptions().get();
+      List<PCollection<KV<String, PubsubMessage>>> pCollections = subscriptions.stream().map(
+              s -> pipeline.apply("ReadPubSubSubscription",
+                      PubsubIO.readMessagesWithAttributes().fromSubscription(s))
+      .apply("Map" + s, MapElements.via(new SimpleFunction<PubsubMessage, KV<String, PubsubMessage>>() {
+        @Override
+        public KV<String, PubsubMessage> apply(PubsubMessage input) {
+          return KV.of(s, input);
+        }
+      }))).collect(Collectors.toList());
+      PCollectionList<KV<String, PubsubMessage>> pCollectionList = PCollectionList.of(pCollections);
+      messages = pCollectionList.apply("Merged PCollection", Flatten.<KV<String, PubsubMessage>>pCollections());
+//      messages =
+//          pipeline.apply(
+//              "ReadPubSubSubscription",
+//              PubsubIO.readMessagesWithAttributes()
+//                  .fromSubscription(options.getInputSubscriptions()));
 
     PCollectionTuple convertedTableRows =
         messages
@@ -349,6 +354,34 @@ public class PubSubToBigQuery {
   }
 
   /**
+   * Method to wrap a {@link BigQueryInsertError} into a {@link FailsafeElement}.
+   *
+   * @param insertError BigQueryInsert error.
+   * @return FailsafeElement object.
+   * @throws IOException
+   */
+  static FailsafeElement<String, String> wrapBigQueryInsertError(
+          BigQueryInsertError insertError) {
+
+    FailsafeElement<String, String> failsafeElement;
+    try {
+
+      String rowPayload = JSON_FACTORY.toString(insertError.getRow());
+      String errorMessage = JSON_FACTORY.toString(insertError.getError());
+
+      failsafeElement = FailsafeElement.of(rowPayload, rowPayload);
+      failsafeElement.setErrorMessage(errorMessage);
+      System.out.println(errorMessage);
+
+    } catch (IOException e) {
+      throw new RuntimeException(e);
+    }
+
+    return failsafeElement;
+  }
+
+
+  /**
    * The {@link PubsubMessageToTableRow} class is a {@link PTransform} which transforms incoming
    * {@link PubsubMessage} objects into {@link TableRow} objects for insertion into BigQuery while
    * applying an optional UDF to the input. The executions of the UDF and transformation to {@link
@@ -371,7 +404,7 @@ public class PubSubToBigQuery {
    * </ul>
    */
   static class PubsubMessageToTableRow
-      extends PTransform<PCollection<PubsubMessage>, PCollectionTuple> {
+      extends PTransform<PCollection<KV<String, PubsubMessage>>, PCollectionTuple> {
 
     private final Options options;
 
@@ -380,8 +413,7 @@ public class PubSubToBigQuery {
     }
 
     @Override
-    public PCollectionTuple expand(PCollection<PubsubMessage> input) {
-
+    public PCollectionTuple expand(PCollection<KV<String, PubsubMessage>> input) {
       PCollectionTuple udfOut =
           input
               // Map the incoming messages into FailsafeElements so we can recover from failures
@@ -421,12 +453,36 @@ public class PubSubToBigQuery {
    * output to a error records table.
    */
   static class PubsubMessageToFailsafeElementFn
-      extends DoFn<PubsubMessage, FailsafeElement<PubsubMessage, String>> {
+      extends DoFn<KV<String, PubsubMessage>, FailsafeElement<PubsubMessage, String>> {
+
     @ProcessElement
     public void processElement(ProcessContext context) {
-      PubsubMessage message = context.element();
-      context.output(
-          FailsafeElement.of(message, new String(message.getPayload(), StandardCharsets.UTF_8)));
+      KV<String, PubsubMessage> message = context.element();
+      String timestamp = ZonedDateTime
+              .now( ZoneId.systemDefault() )
+              .format( DateTimeFormatter.ofPattern( "uuuu-MM-dd HH:mm:ss" ) );
+
+      String payload = new String(message.getValue().getPayload(), StandardCharsets.UTF_8);
+
+      List<Attribute> attributeList = new ArrayList<>();
+      if (message.getValue().getAttributeMap() != null) {
+        for (Map.Entry<String, String> entry : message.getValue().getAttributeMap().entrySet()) {
+          Attribute attribute = new Attribute(entry.getKey(), entry.getValue());
+          attributeList.add(attribute);
+        }
+      }
+
+      String pubsub;
+      pubsub = message.getKey();
+      PubsubDLQError pubsubDLQError = new PubsubDLQError(timestamp,
+              payload, Base64.getEncoder().encodeToString(message.getValue().getPayload()), attributeList, pubsub);
+      try {
+        context.output(
+                FailsafeElement.of(message.getValue(), ow.writeValueAsString(pubsubDLQError)));
+      }
+      catch (Exception e) {
+          throw new RuntimeException(e);
+      }
     }
   }
 }

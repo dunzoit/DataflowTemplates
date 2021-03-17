@@ -19,7 +19,6 @@ package com.google.cloud.teleport.templates.common;
 import com.google.api.services.bigquery.model.TableFieldSchema;
 import com.google.api.services.bigquery.model.TableRow;
 import com.google.auto.value.AutoValue;
-import com.google.cloud.teleport.templates.common.DatastoreConverters.CheckNoKey;
 import com.google.cloud.teleport.values.FailsafeElement;
 import com.google.common.base.Throwables;
 import com.google.datastore.v1.Entity;
@@ -177,67 +176,67 @@ public class BigQueryConverters {
   }
 
   /** Reads data from BigQuery and converts it to Datastore Entity format. */
-  @AutoValue
-  public abstract static class BigQueryToEntity extends PTransform<PBegin, PCollectionTuple> {
-
-    abstract ValueProvider<String> query();
-
-    abstract ValueProvider<String> entityKind();
-
-    abstract ValueProvider<String> uniqueNameColumn();
-
-    @Nullable
-    abstract ValueProvider<String> namespace();
-
-    abstract TupleTag<Entity> successTag();
-
-    abstract TupleTag<String> failureTag();
-
-    /** Builder for BigQuery. */
-    @AutoValue.Builder
-    public abstract static class Builder {
-      public abstract Builder setQuery(ValueProvider<String> query);
-
-      public abstract Builder setEntityKind(ValueProvider<String> entityKind);
-
-      public abstract Builder setUniqueNameColumn(ValueProvider<String> uniqueNameColumn);
-
-      public abstract Builder setNamespace(ValueProvider<String> namespace);
-
-      public abstract Builder setSuccessTag(TupleTag<Entity> successTag);
-
-      public abstract Builder setFailureTag(TupleTag<String> failureTag);
-
-      public abstract BigQueryToEntity build();
-    }
-
-    public static Builder newBuilder() {
-      return new AutoValue_BigQueryConverters_BigQueryToEntity.Builder();
-    }
-
-    @Override
-    public PCollectionTuple expand(PBegin begin) {
-      return begin
-          .apply(
-              "AvroToEntity",
-              BigQueryIO.read(
-                      AvroToEntity.newBuilder()
-                          .setEntityKind(entityKind())
-                          .setUniqueNameColumn(uniqueNameColumn())
-                          .setNamespace(namespace())
-                          .build())
-                  .fromQuery(query())
-                  .withoutValidation()
-                  .withTemplateCompatibility()
-                  .usingStandardSql())
-          .apply(
-              "CheckNoKey",
-              CheckNoKey.newBuilder()
-                  .setFailureTag(failureTag())
-                  .setSuccessTag(successTag())
-                  .build());
-    }
-  }
+//  @AutoValue
+//  public abstract static class BigQueryToEntity extends PTransform<PBegin, PCollectionTuple> {
+//
+//    abstract ValueProvider<String> query();
+//
+//    abstract ValueProvider<String> entityKind();
+//
+//    abstract ValueProvider<String> uniqueNameColumn();
+//
+//    @Nullable
+//    abstract ValueProvider<String> namespace();
+//
+//    abstract TupleTag<Entity> successTag();
+//
+//    abstract TupleTag<String> failureTag();
+//
+//    /** Builder for BigQuery. */
+//    @AutoValue.Builder
+//    public abstract static class Builder {
+//      public abstract Builder setQuery(ValueProvider<String> query);
+//
+//      public abstract Builder setEntityKind(ValueProvider<String> entityKind);
+//
+//      public abstract Builder setUniqueNameColumn(ValueProvider<String> uniqueNameColumn);
+//
+//      public abstract Builder setNamespace(ValueProvider<String> namespace);
+//
+//      public abstract Builder setSuccessTag(TupleTag<Entity> successTag);
+//
+//      public abstract Builder setFailureTag(TupleTag<String> failureTag);
+//
+//      public abstract BigQueryToEntity build();
+//    }
+//
+//    public static Builder newBuilder() {
+//      return new AutoValue_BigQueryConverters_BigQueryToEntity.Builder();
+//    }
+//
+//    @Override
+//    public PCollectionTuple expand(PBegin begin) {
+//      return begin
+//          .apply(
+//              "AvroToEntity",
+//              BigQueryIO.read(
+//                      AvroToEntity.newBuilder()
+//                          .setEntityKind(entityKind())
+//                          .setUniqueNameColumn(uniqueNameColumn())
+//                          .setNamespace(namespace())
+//                          .build())
+//                  .fromQuery(query())
+//                  .withoutValidation()
+//                  .withTemplateCompatibility()
+//                  .usingStandardSql())
+//          .apply(
+//              "CheckNoKey",
+//              CheckNoKey.newBuilder()
+//                  .setFailureTag(failureTag())
+//                  .setSuccessTag(successTag())
+//                  .build());
+//    }
+//  }
 
   /** Converts from the BigQuery Avro format into Datastore Entity. */
   @AutoValue
